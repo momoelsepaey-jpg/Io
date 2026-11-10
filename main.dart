@@ -15,39 +15,67 @@ bool inQuietPeriod(DateTime now, int startMin, int endMin) {
 // ---------- مهمة الخلفية ----------
 @pragma('vm:entry-point')
 void startCallback() {
+  WidgetsFlutterBinding.ensureInitialized();
   FlutterForegroundTask.setTaskHandler(ReminderHandler());
 }
 
 class ReminderHandler extends TaskHandler {
-  final AudioPlayer _player = AudioPlayer();
+  AudioPlayer? _player;
   final Random _rnd = Random();
 
+  String _hhmm() {
+    final n = DateTime.now();
+    return '${n.hour.toString().padLeft(2, '0')}:${n.minute.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _playOne() async {
+    String status;
+    try {
+      final quietOn =
+          await FlutterForegroundTask.getData<bool>(key: 'quietOn') ?? false;
+      final s = await FlutterForegroundTask.getData<int>(key: 'quietStart') ?? 0;
+      final e = await FlutterForegroundTask.getData<int>(key: 'quietEnd') ?? 0;
+      if (quietOn && inQuietPeriod(DateTime.now(), s, e)) {
+        status = '${_hhmm()} - ضمن فترة الإيقاف';
+      } else {
+        final list =
+            (await FlutterForegroundTask.getData<String>(key: 'sounds') ?? '')
+                .split('|')
+                .where((x) => x.isNotEmpty)
+                .toList();
+        if (list.isEmpty) {
+          status = '${_hhmm()} - خطأ: لا توجد أصوات';
+        } else {
+          final path =
+              list[_rnd.nextInt(list.length)].replaceFirst('assets/', '');
+          _player ??= AudioPlayer();
+          await _player!.stop();
+          await _player!.setVolume(1.0);
+          await _player!.play(AssetSource(path));
+          status = '${_hhmm()} - تم تشغيل ذكر';
+        }
+      }
+    } catch (err) {
+      status = '${_hhmm()} - خطأ: $err';
+    }
+    try {
+      await FlutterForegroundTask.updateService(notificationText: status);
+    } catch (_) {}
+  }
+
   @override
-  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {}
+  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
+    await _playOne();
+  }
 
   @override
   Future<void> onRepeatEvent(DateTime timestamp) async {
-    final quietOn =
-        await FlutterForegroundTask.getData<bool>(key: 'quietOn') ?? false;
-    final s = await FlutterForegroundTask.getData<int>(key: 'quietStart') ?? 0;
-    final e = await FlutterForegroundTask.getData<int>(key: 'quietEnd') ?? 0;
-    if (quietOn && inQuietPeriod(DateTime.now(), s, e)) return;
-
-    final list =
-        (await FlutterForegroundTask.getData<String>(key: 'sounds') ?? '')
-            .split('|')
-            .where((x) => x.isNotEmpty)
-            .toList();
-    if (list.isEmpty) return;
-
-    final path = list[_rnd.nextInt(list.length)].replaceFirst('assets/', '');
-    await _player.stop();
-    await _player.play(AssetSource(path));
+    await _playOne();
   }
 
   @override
   Future<void> onDestroy(DateTime timestamp) async {
-    await _player.dispose();
+    await _player?.dispose();
   }
 }
 
@@ -85,6 +113,7 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final _minutes = TextEditingController(text: '15');
+  final _testPlayer = AudioPlayer();
   bool _running = false;
   bool _quietOn = true;
   bool _loaded = false;
@@ -208,6 +237,28 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _testSound() async {
+    try {
+      final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+      final sounds = manifest
+          .listAssets()
+          .where((a) => a.startsWith('assets/sounds/'))
+          .toList()
+        ..sort();
+      if (sounds.isEmpty) {
+        _msg('لا توجد ملفات صوتية داخل التطبيق');
+        return;
+      }
+      await _testPlayer.stop();
+      await _testPlayer.setVolume(1.0);
+      await _testPlayer
+          .play(AssetSource(sounds.first.replaceFirst('assets/', '')));
+      _msg('تم إرسال الصوت للتشغيل - تأكد من رفع صوت الوسائط');
+    } catch (e) {
+      _msg('خطأ في تشغيل الصوت: $e');
+    }
+  }
+
   Future<void> _pick(bool start) async {
     final t = await showTimePicker(
         context: context, initialTime: start ? _qs : _qe);
@@ -296,6 +347,12 @@ class _HomePageState extends State<HomePage> {
                 ),
             ]),
           ),
+        ),
+        const SizedBox(height: 16),
+        OutlinedButton.icon(
+          onPressed: _testSound,
+          icon: const Icon(Icons.volume_up),
+          label: const Text('تجربة الصوت الآن'),
         ),
         const SizedBox(height: 16),
         Text(
